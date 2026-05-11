@@ -43,13 +43,13 @@ class VisibilityWeight(nn.Module):
 
         # Store raw (unconstrained) parameters; softplus ensures positivity
         # at runtime so the exponential decay and additive bonuses stay valid.
-        self.w_gamma           = nn.Parameter(torch.tensor(gamma_init))
-        self.w_lambda_weekend  = nn.Parameter(torch.tensor(lambda_weekend_init))
-        self.w_kappa_afternoon = nn.Parameter(torch.tensor(kappa_afternoon_init))
+        self.w_gamma           = nn.Parameter(torch.tensor(gamma_init, dtype=torch.float64))
+        self.w_lambda_weekend  = nn.Parameter(torch.tensor(lambda_weekend_init, dtype=torch.float64))
+        self.w_kappa_afternoon = nn.Parameter(torch.tensor(kappa_afternoon_init, dtype=torch.float64))
 
         # Endorsement weights — unconstrained, sign can be meaningful
-        self.w_comments = nn.Parameter(torch.tensor(w_comments_init))
-        self.w_likes    = nn.Parameter(torch.tensor(w_likes_init))
+        self.w_comments = nn.Parameter(torch.tensor(w_comments_init, dtype=torch.float64))
+        self.w_likes    = nn.Parameter(torch.tensor(w_likes_init, dtype=torch.float64))
 
     # Positive-constrained accessors
     @property
@@ -75,11 +75,11 @@ class VisibilityWeight(nn.Module):
         """Returns visibility weights of shape (E,)."""
 
         # Default branch: u hasn't reposted -> w = 1
-        w = torch.ones(has_reposted.shape[0], device=has_reposted.device)
+        w = torch.ones(has_reposted.shape[0], device=has_reposted.device, dtype=torch.float64)
 
         timestamps = pd.to_datetime(t)
-        dayofweek = torch.tensor(timestamps.dayofweek.values, device=w.device)
-        hour = torch.tensor(timestamps.hour.values, device=w.device)
+        dayofweek = torch.tensor(timestamps.dayofweek.values, device=w.device, dtype=torch.float64)
+        hour = torch.tensor(timestamps.hour.values, device=w.device, dtype=torch.float64)
         t_is_weekend = (dayofweek == 5) | (dayofweek == 6)
         t_is_afternoon = hour >= 17 # in v user's timezone
 
@@ -88,8 +88,8 @@ class VisibilityWeight(nn.Module):
 
             gamma = self.gamma                        # positive scalar
             exp_decay   = gamma * torch.exp(-gamma * delta_t[idx])
-            w_weekend   = self.lambda_weekend  * t_is_weekend[idx].float()
-            w_afternoon = self.kappa_afternoon * t_is_afternoon[idx].float()
+            w_weekend   = self.lambda_weekend  * t_is_weekend[idx].double()
+            w_afternoon = self.kappa_afternoon * t_is_afternoon[idx].double()
             w_endorse = F.sigmoid(
                     self.w_comments * comments[idx] +
                     self.w_likes * likes[idx]
@@ -108,21 +108,21 @@ class CascadePredictor(nn.Module):
         self.sigma = sigma
 
         # Learnable weights
-        self.w_homophily = nn.Parameter(torch.tensor(1))
-        self.w_followers = nn.Parameter(torch.tensor(1))
-        self.w_influence = nn.Parameter(torch.tensor(1))
+        self.w_homophily = nn.Parameter(torch.tensor(1, dtype=torch.float64))
+        self.w_followers = nn.Parameter(torch.tensor(1, dtype=torch.float64))
+        self.w_influence = nn.Parameter(torch.tensor(1, dtype=torch.float64))
 
         # Message passing layers
         self.W_users = nn.ModuleList([
-            nn.Linear(2 * d_node, d_node) for _ in range(L)
+            nn.Linear(2 * d_node, d_node, dtype=torch.float64) for _ in range(L)
         ])
 
         self.W_edges = nn.ModuleList([
-            nn.Linear(d_edge, d_edge) for _ in range(L)
+            nn.Linear(d_edge, d_edge, dtype=torch.float64) for _ in range(L)
         ])
 
         # Final classifier
-        self.W_y = nn.Linear(d_edge + d_node, 1)
+        self.W_y = nn.Linear(d_edge + d_node, 1, dtype=torch.float64)
 
         # Visibility weight function
         self.visibility = VisibilityWeight()
@@ -187,7 +187,7 @@ class CascadePredictor(nn.Module):
                 * h_u
             ) # (E, d)
 
-            agg = torch.zeros_like(h)
+            agg = torch.zeros_like(h, dtype=torch.float64)
             agg.index_add_(0, src, messages)
 
             # ---- Node update ----
