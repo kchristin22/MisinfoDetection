@@ -68,7 +68,7 @@ class VisibilityWeight(nn.Module):
         self,
         has_reposted: Tensor,    # bool  (E,) – has neighbour u reposted?
         delta_t: Tensor,         # float (E,) – time since u reposted (0 if not yet)
-        t: list[string],         # string (E,) ("yyyy-mm-dd") – current time in each v user's timezone
+        t: list[str],         # string (E,) ("yyyy-mm-dd") – current time in each v user's timezone
         comments: Tensor,        # float (E,) – comment count for u
         likes: Tensor,           # float (E,) – like count for u
     ) -> Tensor:
@@ -152,7 +152,7 @@ class CascadePredictor(nn.Module):
         node_mask_l = node_mask[:, 0]
         edge_mask_l = has_reposted[:, 0]
 
-        predicted_edges = torch.zeros(E,self.L, device=x.device, dtype=torch.bool)
+        edge_prob = torch.zeros(E,self.L, device=x.device)
 
         for l in range(self.L):
 
@@ -171,8 +171,8 @@ class CascadePredictor(nn.Module):
             )
 
             # group softmax (per source node)
-            attn_logits = attn_logits.masked_fill(v_mask_edge, float('-inf'))
             a_vu = softmax(attn_logits, src)
+            a_vu = a_vu.masked_fill(v_mask_edge, 0)  # zero out masked edges
 
             # ---- Visibility weights ----
             w_vis = self.visibility(
@@ -180,7 +180,12 @@ class CascadePredictor(nn.Module):
             )  # (E,)
 
             # ---- Message aggregation ----
-            messages = (~v_mask_edge).unsqueeze(-1) * w_vis * a_vu * h_u  # (E, d)
+            messages = (
+                (~v_mask_edge).unsqueeze(-1)
+                * w_vis.unsqueeze(-1)
+                * a_vu.unsqueeze(-1)
+                * h_u
+            ) # (E, d)
 
             agg = torch.zeros_like(h)
             agg.index_add_(0, src, messages)
@@ -217,20 +222,19 @@ class CascadePredictor(nn.Module):
             ], dim=-1)
 
             # ---- Prediction ----
-            y = torch.sigmoid(self.W_y(h_vu)).squeeze(-1)  # (E,)
-
-            # ---- Thresholding (binary decision) ----
-            predicted_edges[:,l] = (y > 0.5)
+            edge_prob[:,l] = torch.sigmoid(self.W_y(h_vu)).squeeze(-1)  # (E,)
 
             # ---- Update mask ----
-            if l < (L-1):
+            if l < (self.L - 1):
                 if self.training:
                     node_mask_l = node_mask_l | node_mask[:, l+1]
                     edge_mask_l = edge_mask_l | has_reposted[:, l+1]
                 else:
                     new_nodes = torch.zeros_like(node_mask_l)
-                    new_nodes[src[y > 0.5]] = True
+                    predicted_edges = edge_prob[:,l] > 0.5
+                    new_nodes[src[predicted_edges]] = True
                     node_mask_l = node_mask_l | new_nodes
-                    edge_mask_l = edge_mask_l | predicted_edges[:,l]
+                    edge_mask_l = edge_mask_l | predicted_edges
+                    influence_ratio = influence_ratio + F.one_hot(dst[predicted_edges], num_classes=N).float().sum(dim=0) / (followers_count + 1)
 
-        return predicted_edges
+        return edge_prob
