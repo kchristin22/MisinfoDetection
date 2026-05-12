@@ -153,6 +153,7 @@ class CascadePredictor(nn.Module):
         edge_mask_l = has_reposted[:, 0]
 
         edge_prob = torch.zeros(E,self.L, device=x.device)
+        probs = []
 
         for l in range(self.L):
 
@@ -187,8 +188,7 @@ class CascadePredictor(nn.Module):
                 * h_u
             ) # (E, d)
 
-            agg = torch.zeros_like(h, dtype=torch.float64)
-            agg.index_add_(0, src, messages)
+            agg = torch.zeros_like(h, dtype=torch.float64).index_add(0, src, messages)
 
             # ---- Node update ----
             h_new = self.W_users[l](
@@ -222,7 +222,8 @@ class CascadePredictor(nn.Module):
             ], dim=-1)
 
             # ---- Prediction ----
-            edge_prob[:,l] = torch.sigmoid(self.W_y(h_vu)).squeeze(-1)  # (E,)
+            probs_l = torch.sigmoid(self.W_y(h_vu)).squeeze(-1)  # (E,)
+            probs.append(probs_l)
 
             # ---- Update mask ----
             if l < (self.L - 1):
@@ -236,5 +237,7 @@ class CascadePredictor(nn.Module):
                     node_mask_l = node_mask_l | new_nodes
                     edge_mask_l = edge_mask_l | predicted_edges
                     influence_ratio = influence_ratio + F.one_hot(dst[predicted_edges], num_classes=N).float().sum(dim=0) / (followers_count + 1)
+        
+        edge_prob = torch.stack(probs, dim=1)  # (E, L)
 
         return edge_prob
