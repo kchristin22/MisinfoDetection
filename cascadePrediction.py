@@ -173,14 +173,13 @@ class CascadePredictor(nn.Module):
 
             # group softmax (per source node)
             a_vu = softmax(attn_logits, src)
-            a_vu = a_vu.masked_fill(v_mask_edge, 0)  # zero out masked edges
 
             # ---- Visibility weights ----
             w_vis = self.visibility(
                 edge_mask_l, delta_t, t, comments, likes
             )  # (E,)
 
-            # ---- Message aggregation ----
+            # ---- Message aggregation (for src nodes that haven't reposted)----
             messages = (
                 (~v_mask_edge).unsqueeze(-1)
                 * w_vis.unsqueeze(-1)
