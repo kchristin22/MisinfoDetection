@@ -45,7 +45,7 @@ if __name__ == "__main__":
     model = CascadePredictor(
     d_node=4,
     d_edge=3,
-    L=2
+    L=3
     )
 
     model.train()
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # ---- Graph ----
     N = 4   # nodes
     E = 5   # edges
-    L = 2   # layers
+    L = 3   # layers
 
     edge_index = torch.tensor([
         [0, 0, 1, 2, 3],  # src (v)
@@ -69,12 +69,17 @@ if __name__ == "__main__":
 
     # ---- Temporal inputs ----
     has_reposted = torch.zeros(E, L, dtype=torch.bool)
+    has_reposted[3, 0] = True
     has_reposted[0, 1] = True
+    has_reposted[1, 1] = True
     has_reposted[2, 1] = True
+    has_reposted[4, 2] = True
 
     node_mask = torch.zeros(N, L, dtype=torch.bool)
+    node_mask[2, 0] = True
+    node_mask[0, 1] = True
     node_mask[1, 1] = True
-    node_mask[2, 1] = True
+    node_mask[3, 2] = True
     delta_t = torch.rand(E)
     t = ["2024-01-01"] * E
     comments = torch.rand(E)
@@ -109,7 +114,10 @@ if __name__ == "__main__":
 
     for l in range(model.L):
         grad_norm = model.W_users[l].weight.grad.norm().item()
+        print("grad W_users", model.W_users[l].weight.grad)
         print(f"W_users[{l}] grad norm:", grad_norm)
+        print("grad W_edges", model.W_edges[l].weight.grad)
+        print(f"W_edges[{l}] grad norm:", model.W_edges[l].weight.grad.norm().item())
 
     print("W_y grad norm:", model.W_y.weight.grad)
 
