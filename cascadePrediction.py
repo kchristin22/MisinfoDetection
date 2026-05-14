@@ -80,25 +80,16 @@ class VisibilityWeight(nn.Module):
     ) -> Tensor:
         """Returns visibility weights of shape (E,)."""
 
-        # Default branch: u hasn't reposted -> w = 1
-        w = torch.ones(
-            repost_edges.shape[0], device=repost_edges.device, dtype=torch.float64)
+        gamma = self.gamma
+        exp_decay = gamma * torch.exp(-gamma * delta_t)
+        w_weekend = self.lambda_weekend * t_is_weekend.double()
+        w_afternoon = self.kappa_afternoon * t_is_afternoon.double()
+        w_endorse = torch.sigmoid(
+            self.w_comments * comments + self.w_likes * likes)
 
-        if repost_edges.any():
-            idx = repost_edges.nonzero(as_tuple=True)[0]
+        w_reposted = exp_decay + w_weekend + w_afternoon + w_endorse
 
-            gamma = self.gamma                        # positive scalar
-            exp_decay = gamma * torch.exp(-gamma * delta_t[idx])
-            w_weekend = self.lambda_weekend * t_is_weekend[idx].double()
-            w_afternoon = self.kappa_afternoon * t_is_afternoon[idx].double()
-            w_endorse = F.sigmoid(
-                self.w_comments * comments[idx] +
-                self.w_likes * likes[idx]
-            )
-
-            w[idx] = exp_decay + w_weekend + w_afternoon + w_endorse
-
-        return w  # (E,)
+        return torch.where(repost_edges.bool(), w_reposted, torch.ones_like(w_reposted))
 
 
 class CascadePredictor(nn.Module):
@@ -152,21 +143,20 @@ class CascadePredictor(nn.Module):
         h_e = edge_attr
 
         src, dst = edge_index  # v -> u
+        h_v = h[src]  # (E, d)
+        h_u = h[dst]
+        h_v_dot_h_u = (h_v * h_u)
 
         node_mask_l = node_mask[:, 0]
         edge_mask_l = edge_mask[:, 0]
         influence_ratio_l = influence_ratio[:, 0]
 
-        edge_prob = torch.zeros(E, self.L, device=x.device)
         probs = []
 
         for l in range(self.L):
 
             # ---- Attention scores a_vu ----
-            h_v = h[src]  # (E, d)
-            h_u = h[dst]
-
-            homophily = (h_v * h_u).sum(dim=-1)  # dot product
+            homophily = h_v_dot_h_u.sum(dim=-1)  # dot product
 
             attn_logits = (
                 self.w_homophily * homophily +
@@ -218,10 +208,11 @@ class CascadePredictor(nn.Module):
             # ---- Edge representation ----
             h_v = h[src]
             h_u = h[dst]
+            h_v_dot_h_u = (h_v * h_u)
 
             h_vu = torch.cat([
                 h_e,
-                h_v * h_u
+                h_v_dot_h_u
             ], dim=-1)
 
             # ---- Prediction ----
@@ -235,24 +226,25 @@ class CascadePredictor(nn.Module):
                     edge_mask_l = edge_mask[:, l + 1]
                     influence_ratio_l = influence_ratio[:, l + 1]
                 else:
-                    predicted_edges = edge_prob[:, l] > 0.5
-                    new_nodes = torch.zeros_like(node_mask_l)
-                    new_nodes[src[predicted_edges]] = True
-                    node_mask_l |= new_nodes
-                    edge_mask_l |= predicted_edges
+                    with torch.no_grad():
+                        predicted_edges = probs_l > 0.5
+                        new_nodes = torch.zeros_like(node_mask_l)
+                        new_nodes[src[predicted_edges]] = True
+                        node_mask_l |= new_nodes
+                        edge_mask_l |= predicted_edges
 
-                    repost_counts = torch.zeros(
-                        N,
-                        device=x.device,
-                        dtype=torch.float64
-                    )
-                    repost_counts.index_add_(
-                        0,
-                        dst,
-                        predicted_edges.double()
-                    )
-                    influence_ratio_l = (
-                        influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
+                        repost_counts = torch.zeros(
+                            N,
+                            device=x.device,
+                            dtype=torch.float64
+                        )
+                        repost_counts.index_add_(
+                            0,
+                            dst,
+                            predicted_edges.double()
+                        )
+                        influence_ratio_l = (
+                            influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
 
         edge_prob = torch.stack(probs, dim=1)  # (E, L)
 
