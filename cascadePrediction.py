@@ -43,13 +43,18 @@ class VisibilityWeight(nn.Module):
 
         # Store raw (unconstrained) parameters; softplus ensures positivity
         # at runtime so the exponential decay and additive bonuses stay valid.
-        self.w_gamma           = nn.Parameter(torch.tensor(gamma_init, dtype=torch.float64))
-        self.w_lambda_weekend  = nn.Parameter(torch.tensor(lambda_weekend_init, dtype=torch.float64))
-        self.w_kappa_afternoon = nn.Parameter(torch.tensor(kappa_afternoon_init, dtype=torch.float64))
+        self.w_gamma = nn.Parameter(
+            torch.tensor(gamma_init, dtype=torch.float64))
+        self.w_lambda_weekend = nn.Parameter(
+            torch.tensor(lambda_weekend_init, dtype=torch.float64))
+        self.w_kappa_afternoon = nn.Parameter(
+            torch.tensor(kappa_afternoon_init, dtype=torch.float64))
 
         # Endorsement weights — unconstrained, sign can be meaningful
-        self.w_comments = nn.Parameter(torch.tensor(w_comments_init, dtype=torch.float64))
-        self.w_likes    = nn.Parameter(torch.tensor(w_likes_init, dtype=torch.float64))
+        self.w_comments = nn.Parameter(torch.tensor(
+            w_comments_init, dtype=torch.float64))
+        self.w_likes = nn.Parameter(torch.tensor(
+            w_likes_init, dtype=torch.float64))
 
     # Positive-constrained accessors
     @property
@@ -67,32 +72,37 @@ class VisibilityWeight(nn.Module):
     def forward(
         self,
         repost_edges: Tensor,    # bool  (E,) – has neighbour u reposted?
-        delta_t: Tensor,         # float (E,) – time since u reposted (0 if not yet)
-        t: list[str],         # string (E,) ("yyyy-mm-dd") – current time in each v user's timezone
+        delta_t: Tensor,         # float (E,) – time since u reposted
+                                 # (0 if not yet)
+        t: list[str],            # string (E,) ("yyyy-mm-dd") – current time
+                                 # in each v user's timezone
         comments: Tensor,        # float (E,) – comment count for u
         likes: Tensor,           # float (E,) – like count for u
     ) -> Tensor:
         """Returns visibility weights of shape (E,)."""
 
         # Default branch: u hasn't reposted -> w = 1
-        w = torch.ones(repost_edges.shape[0], device=repost_edges.device, dtype=torch.float64)
+        w = torch.ones(
+            repost_edges.shape[0], device=repost_edges.device, dtype=torch.float64)
 
         timestamps = pd.to_datetime(t)
-        dayofweek = torch.tensor(timestamps.dayofweek.values, device=w.device, dtype=torch.float64)
-        hour = torch.tensor(timestamps.hour.values, device=w.device, dtype=torch.float64)
+        dayofweek = torch.tensor(
+            timestamps.dayofweek.values, device=w.device, dtype=torch.float64)
+        hour = torch.tensor(timestamps.hour.values,
+                            device=w.device, dtype=torch.float64)
         t_is_weekend = (dayofweek == 5) | (dayofweek == 6)
-        t_is_afternoon = hour >= 17 # in v user's timezone
+        t_is_afternoon = hour >= 17  # in v user's timezone
 
         if repost_edges.any():
             idx = repost_edges.nonzero(as_tuple=True)[0]
 
             gamma = self.gamma                        # positive scalar
-            exp_decay   = gamma * torch.exp(-gamma * delta_t[idx])
-            w_weekend   = self.lambda_weekend  * t_is_weekend[idx].double()
+            exp_decay = gamma * torch.exp(-gamma * delta_t[idx])
+            w_weekend = self.lambda_weekend * t_is_weekend[idx].double()
             w_afternoon = self.kappa_afternoon * t_is_afternoon[idx].double()
             w_endorse = F.sigmoid(
-                    self.w_comments * comments[idx] +
-                    self.w_likes * likes[idx]
+                self.w_comments * comments[idx] +
+                self.w_likes * likes[idx]
             )
 
             w[idx] = exp_decay + w_weekend + w_afternoon + w_endorse
@@ -132,8 +142,10 @@ class CascadePredictor(nn.Module):
         x,                  # (N, d_node)
         edge_index,         # (2, E)
         edge_attr,          # (E, d_edge)
-        node_mask,           # (N, L) bool: 1 = frozen node (has reposted before layer l)
-        edge_mask,          # (E, L) bool: 1 = edge frozen (source node has reposted before layer l)
+        node_mask,          # (N, L) bool: 1 = frozen node
+                            # (has reposted before layer l)
+        edge_mask,          # (E, L) bool: 1 = edge frozen
+                            # (source node has reposted before layer l)
         followers_count,    # (N,)
         influence_ratio,    # (N, L)
         delta_t,            # (E,)
@@ -153,7 +165,7 @@ class CascadePredictor(nn.Module):
         edge_mask_l = edge_mask[:, 0]
         influence_ratio_l = influence_ratio[:, 0]
 
-        edge_prob = torch.zeros(E,self.L, device=x.device)
+        edge_prob = torch.zeros(E, self.L, device=x.device)
         probs = []
 
         for l in range(self.L):
@@ -184,9 +196,10 @@ class CascadePredictor(nn.Module):
                 * w_vis.unsqueeze(-1)
                 * a_vu.unsqueeze(-1)
                 * h_u
-            ) # (E, d)
+            )  # (E, d)
 
-            agg = torch.zeros_like(h, dtype=torch.float64).index_add(0, src, messages)
+            agg = torch.zeros_like(
+                h, dtype=torch.float64).index_add(0, src, messages)
 
             # ---- Node update ----
             h_new = self.W_users[l](
@@ -246,7 +259,8 @@ class CascadePredictor(nn.Module):
                         dst,
                         predicted_edges.double()
                     )
-                    influence_ratio_l = (influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
+                    influence_ratio_l = (
+                        influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
 
         edge_prob = torch.stack(probs, dim=1)  # (E, L)
 
