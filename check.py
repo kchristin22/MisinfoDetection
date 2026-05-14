@@ -59,47 +59,56 @@ if __name__ == "__main__":
         [0, 0, 1, 2, 3],  # src (v)
         [1, 2, 2, 3, 0]   # dst (u)
     ])
+    src, dst = edge_index
+
+    # ---- Temporal inputs ----
+    node_mask = torch.zeros(N, L, dtype=torch.bool)   
+    node_mask[2, 0] = True # Node 2 is a root node that has already reposted at t=0
+
+    repost_edges = torch.zeros(E, L, dtype=torch.bool)
+    repost_edges[1, 1] = True # Node 0 reposts from node 2 before layer 1
+    repost_edges[2, 1] = True # Node 1 reposts from node 2 before layer 1
+    repost_edges[4, 2] = True # Node 3 reposts from node 0 before layer 2
+    edge_ids, layer_ids = repost_edges.nonzero(as_tuple=True)
+    
+    node_mask[src[edge_ids], layer_ids] = True
+    node_mask = torch.cumsum(
+        node_mask,
+        dim=1
+    )
+
+    edge_mask = node_mask[src]  # edge is frozen if source node has reposted before layer l
 
     # ---- Features ----
     x = torch.randn(N, 4, dtype=torch.float64, requires_grad=True)
-    edge_attr = torch.randn(E, 3, dtype=torch.float64)
-
-    followers_count = torch.rand(N)
-    influence_ratio = torch.rand(N)
-
-    # ---- Temporal inputs ----
-    has_reposted = torch.zeros(E, L, dtype=torch.bool)
-    has_reposted[3, 0] = True
-    has_reposted[0, 1] = True
-    has_reposted[1, 1] = True
-    has_reposted[2, 1] = True
-    has_reposted[4, 2] = True
-
-    node_mask = torch.zeros(N, L, dtype=torch.bool)
-    node_mask[2, 0] = True
-    node_mask[0, 1] = True
-    node_mask[1, 1] = True
-    node_mask[3, 2] = True
+    edge_attr = torch.randn(E, 3, dtype=torch.float64)    
+    followers_count = torch.tensor([1, 1, 2, 1])  # (N,)
+    influence_ratio = torch.zeros(N, L, dtype=torch.float64)  # (N, L)
+    repost_counts = torch.zeros(N, L, dtype=torch.float64, device=dst.device)
+    repost_counts.index_put_(
+        (dst[edge_ids], layer_ids),
+        torch.ones_like(edge_ids, dtype=torch.float64),
+        accumulate=True
+    )
+    repost_counts = torch.cumsum(repost_counts, dim=1)
+    influence_ratio = repost_counts / (followers_count.unsqueeze(1) + 1e-8)
     delta_t = torch.rand(E)
     t = ["2024-01-01"] * E
     comments = torch.rand(E)
     likes = torch.rand(E)
 
-    t_event = torch.argmax(has_reposted.int(), dim=1)
-    t_event[has_reposted.sum(dim=1) == 0] = -1  # censored
-
     edge_prob = model(
         x,
         edge_index,
         edge_attr,
+        node_mask,
+        edge_mask,
         followers_count,
         influence_ratio,
-        has_reposted,
         delta_t,
         t,
         comments,
         likes,
-        node_mask
     )  # (E, L)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -107,6 +116,8 @@ if __name__ == "__main__":
     optimizer.zero_grad()
 
     print("Edge probabilities:", edge_prob)
+
+    t_event = torch.argmax(repost_edges.int(), dim=1) - 1 # event happened before repost mask, -1 if no event
 
     loss = survival_loss(edge_prob, t_event)
 
@@ -130,11 +141,11 @@ if __name__ == "__main__":
     torch.autograd.gradcheck(survival_loss, (edge_prob, t_event))
 
     torch.autograd.gradcheck(
-        lambda x, edge_attr, followers_count, influence_ratio, delta_t, comments, likes: model(
-            x, edge_index, edge_attr, followers_count, influence_ratio,
-            has_reposted, delta_t, t, comments, likes, node_mask
+        lambda x, edge_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, comments, likes: model(
+            x, edge_index, edge_attr, node_mask, edge_mask, followers_count, influence_ratio,
+            delta_t, t, comments, likes
         ).sum(),
-        (x, edge_attr, followers_count, influence_ratio, delta_t, comments, likes),
+        (x, edge_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, comments, likes),
         eps=1e-6,
         atol=1e-4,
         rtol=1e-3

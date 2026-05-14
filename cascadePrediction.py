@@ -66,7 +66,7 @@ class VisibilityWeight(nn.Module):
 
     def forward(
         self,
-        has_reposted: Tensor,    # bool  (E,) – has neighbour u reposted?
+        repost_edges: Tensor,    # bool  (E,) – has neighbour u reposted?
         delta_t: Tensor,         # float (E,) – time since u reposted (0 if not yet)
         t: list[str],         # string (E,) ("yyyy-mm-dd") – current time in each v user's timezone
         comments: Tensor,        # float (E,) – comment count for u
@@ -75,7 +75,7 @@ class VisibilityWeight(nn.Module):
         """Returns visibility weights of shape (E,)."""
 
         # Default branch: u hasn't reposted -> w = 1
-        w = torch.ones(has_reposted.shape[0], device=has_reposted.device, dtype=torch.float64)
+        w = torch.ones(repost_edges.shape[0], device=repost_edges.device, dtype=torch.float64)
 
         timestamps = pd.to_datetime(t)
         dayofweek = torch.tensor(timestamps.dayofweek.values, device=w.device, dtype=torch.float64)
@@ -83,8 +83,8 @@ class VisibilityWeight(nn.Module):
         t_is_weekend = (dayofweek == 5) | (dayofweek == 6)
         t_is_afternoon = hour >= 17 # in v user's timezone
 
-        if has_reposted.any():
-            idx = has_reposted.nonzero(as_tuple=True)[0]
+        if repost_edges.any():
+            idx = repost_edges.nonzero(as_tuple=True)[0]
 
             gamma = self.gamma                        # positive scalar
             exp_decay   = gamma * torch.exp(-gamma * delta_t[idx])
@@ -132,14 +132,14 @@ class CascadePredictor(nn.Module):
         x,                  # (N, d_node)
         edge_index,         # (2, E)
         edge_attr,          # (E, d_edge)
+        node_mask,           # (N, L) bool: 1 = frozen node (has reposted before layer l)
+        edge_mask,          # (E, L) bool: 1 = edge frozen (source node has reposted before layer l)
         followers_count,    # (N,)
-        influence_ratio,    # (N,)
-        has_reposted,       # (E, L)
+        influence_ratio,    # (N, L)
         delta_t,            # (E,)
         t,                  # list[str] length E
         comments,           # (E,)
         likes,              # (E,)
-        node_mask           # (N, L) bool: 1 = frozen
     ):
         N = x.size(0)
         E = edge_index.size(1)
@@ -150,7 +150,8 @@ class CascadePredictor(nn.Module):
         src, dst = edge_index  # v -> u
 
         node_mask_l = node_mask[:, 0]
-        edge_mask_l = has_reposted[:, 0]
+        edge_mask_l = edge_mask[:, 0]
+        influence_ratio_l = influence_ratio[:, 0]
 
         edge_prob = torch.zeros(E,self.L, device=x.device)
         probs = []
@@ -161,14 +162,12 @@ class CascadePredictor(nn.Module):
             h_v = h[src]  # (E, d)
             h_u = h[dst]
 
-            v_mask_edge = node_mask_l[src]   # v reposted (source of edge)
-
             homophily = (h_v * h_u).sum(dim=-1)  # dot product
 
             attn_logits = (
                 self.w_homophily * homophily +
                 self.w_followers * followers_count[dst] +
-                node_mask_l[dst] * self.w_influence * influence_ratio[dst]
+                node_mask_l[dst] * self.w_influence * influence_ratio_l[dst]
             )
 
             # group softmax (per source node)
@@ -181,7 +180,7 @@ class CascadePredictor(nn.Module):
 
             # ---- Message aggregation (for src nodes that haven't reposted)----
             messages = (
-                (~v_mask_edge).unsqueeze(-1)
+                (~edge_mask_l).unsqueeze(-1)
                 * w_vis.unsqueeze(-1)
                 * a_vu.unsqueeze(-1)
                 * h_u
@@ -206,8 +205,8 @@ class CascadePredictor(nn.Module):
             h_e_new = torch.sigmoid(self.W_edges[l](h_e))
 
             # freeze edges where repost happened
-            edge_mask = edge_mask_l.unsqueeze(-1)
-            h_e = edge_mask * h_e + (~edge_mask) * h_e_new
+            e_mask_edge = edge_mask_l.unsqueeze(-1)
+            h_e = e_mask_edge * h_e + (~e_mask_edge) * h_e_new
 
             h_e = F.normalize(h_e, p=2, dim=-1)
 
@@ -227,16 +226,28 @@ class CascadePredictor(nn.Module):
             # ---- Update mask ----
             if l < (self.L - 1):
                 if self.training:
-                    node_mask_l = node_mask_l | node_mask[:, l+1]
-                    edge_mask_l = edge_mask_l | has_reposted[:, l+1]
+                    node_mask_l = node_mask[:, l + 1]
+                    edge_mask_l = edge_mask[:, l + 1]
+                    influence_ratio_l = influence_ratio[:, l + 1]
                 else:
+                    predicted_edges = edge_prob[:, l] > 0.5
                     new_nodes = torch.zeros_like(node_mask_l)
-                    predicted_edges = edge_prob[:,l] > 0.5
                     new_nodes[src[predicted_edges]] = True
-                    node_mask_l = node_mask_l | new_nodes
-                    edge_mask_l = edge_mask_l | predicted_edges
-                    influence_ratio = influence_ratio + F.one_hot(dst[predicted_edges], num_classes=N).float().sum(dim=0) / (followers_count + 1)
-        
+                    node_mask_l |= new_nodes
+                    edge_mask_l |= predicted_edges
+
+                    repost_counts = torch.zeros(
+                        N,
+                        device=x.device,
+                        dtype=torch.float64
+                    )
+                    repost_counts.index_add_(
+                        0,
+                        dst,
+                        predicted_edges.double()
+                    )
+                    influence_ratio_l = (influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
+
         edge_prob = torch.stack(probs, dim=1)  # (E, L)
 
         return edge_prob
