@@ -4,12 +4,10 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.utils import softmax
 
-import pandas as pd
-
-
 # ---------------------------------------------------------------------------
 # Visibility weight function  w(t, Δt)
 # ---------------------------------------------------------------------------
+
 
 class VisibilityWeight(nn.Module):
     """
@@ -74,8 +72,9 @@ class VisibilityWeight(nn.Module):
         repost_edges: Tensor,    # bool  (E,) – has neighbour u reposted?
         delta_t: Tensor,         # float (E,) – time since u reposted
                                  # (0 if not yet)
-        t: list[str],            # string (E,) ("yyyy-mm-dd") – current time
-                                 # in each v user's timezone
+        t_is_weekend: Tensor,    # bool  (E,) – is t a weekend day?
+        t_is_afternoon: Tensor,  # bool  (E,) – is t in the afternoon
+                                 # (>=5pm in user's timezone)?
         comments: Tensor,        # float (E,) – comment count for u
         likes: Tensor,           # float (E,) – like count for u
     ) -> Tensor:
@@ -84,14 +83,6 @@ class VisibilityWeight(nn.Module):
         # Default branch: u hasn't reposted -> w = 1
         w = torch.ones(
             repost_edges.shape[0], device=repost_edges.device, dtype=torch.float64)
-
-        timestamps = pd.to_datetime(t)
-        dayofweek = torch.tensor(
-            timestamps.dayofweek.values, device=w.device, dtype=torch.float64)
-        hour = torch.tensor(timestamps.hour.values,
-                            device=w.device, dtype=torch.float64)
-        t_is_weekend = (dayofweek == 5) | (dayofweek == 6)
-        t_is_afternoon = hour >= 17  # in v user's timezone
 
         if repost_edges.any():
             idx = repost_edges.nonzero(as_tuple=True)[0]
@@ -149,7 +140,8 @@ class CascadePredictor(nn.Module):
         followers_count,    # (N,)
         influence_ratio,    # (N, L)
         delta_t,            # (E,)
-        t,                  # list[str] length E
+        t_is_weekend,       # (E,)
+        t_is_afternoon,     # (E,)
         comments,           # (E,)
         likes,              # (E,)
     ):
@@ -187,7 +179,7 @@ class CascadePredictor(nn.Module):
 
             # ---- Visibility weights ----
             w_vis = self.visibility(
-                edge_mask_l, delta_t, t, comments, likes
+                edge_mask_l, delta_t, t_is_weekend, t_is_afternoon, comments, likes
             )  # (E,)
 
             # ---- Message aggregation (for src nodes that haven't reposted)----

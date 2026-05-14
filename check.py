@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+import pandas as pd
+
 from cascadePrediction import CascadePredictor
 
 # ---------------------------------------------------------------------------
@@ -68,7 +70,7 @@ if __name__ == "__main__":
     # ---- Temporal inputs ----
     node_mask = torch.zeros(N, L, dtype=torch.bool)
     node_mask[2, 0] = True  # Node 2 is a root node
-                            # that has already reposted at t=0
+    # that has already reposted at t=0
 
     repost_edges = torch.zeros(E, L, dtype=torch.bool)
     repost_edges[1, 1] = True  # Node 0 reposts from node 2 before layer 1
@@ -83,7 +85,7 @@ if __name__ == "__main__":
     )
 
     edge_mask = node_mask[src]  # edge is frozen if source node
-                                # has reposted before layer l
+    # has reposted before layer l
 
     # ---- Features ----
     x = torch.randn(N, 4, dtype=torch.float64, requires_grad=True)
@@ -100,6 +102,13 @@ if __name__ == "__main__":
     influence_ratio = repost_counts / (followers_count.unsqueeze(1) + 1e-8)
     delta_t = torch.rand(E)
     t = ["2024-01-01"] * E
+    timestamps = pd.to_datetime(t)
+    dayofweek = torch.tensor(
+        timestamps.dayofweek.values, device=repost_edges.device, dtype=torch.float64)
+    hour = torch.tensor(timestamps.hour.values,
+                        device=repost_edges.device, dtype=torch.float64)
+    t_is_weekend = (dayofweek == 5) | (dayofweek == 6)
+    t_is_afternoon = hour >= 17  # in v user's timezone
     comments = torch.rand(E)
     likes = torch.rand(E)
 
@@ -112,7 +121,8 @@ if __name__ == "__main__":
         followers_count,
         influence_ratio,
         delta_t,
-        t,
+        t_is_weekend,
+        t_is_afternoon,
         comments,
         likes,
     )  # (E, L)
@@ -124,7 +134,7 @@ if __name__ == "__main__":
     print("Edge probabilities:", edge_prob)
 
     t_event = torch.argmax(repost_edges.int(), dim=1)  # event happened before
-                                                       # layer, -1 if no event
+    # layer, -1 if no event
 
     loss = survival_loss(edge_prob, t_event)
 
@@ -149,12 +159,12 @@ if __name__ == "__main__":
     torch.autograd.gradcheck(survival_loss, (edge_prob, t_event))
 
     torch.autograd.gradcheck(
-        lambda x, edge_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, comments, likes: model(
+        lambda x, edge_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, t_is_weekend, t_is_afternoon, comments, likes: model(
             x, edge_index, edge_attr, node_mask, edge_mask, followers_count, influence_ratio,
-            delta_t, t, comments, likes
+            delta_t, t_is_weekend, t_is_afternoon, comments, likes
         ).sum(),
         (x, edge_attr, node_mask, edge_mask, followers_count,
-         influence_ratio, delta_t, comments, likes),
+         influence_ratio, delta_t, t_is_weekend, t_is_afternoon, comments, likes),
         eps=1e-6,
         atol=1e-4,
         rtol=1e-3
