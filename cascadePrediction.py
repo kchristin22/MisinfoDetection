@@ -93,7 +93,7 @@ class VisibilityWeight(nn.Module):
 
 
 class CascadePredictor(nn.Module):
-    def __init__(self, d_node: int, d_edge: int, L: int, sigma=F.relu):
+    def __init__(self, d_node: int, d_edge: int, d_post: int, L: int, sigma=F.relu):
         super().__init__()
 
         self.L = L
@@ -113,8 +113,10 @@ class CascadePredictor(nn.Module):
             nn.Linear(d_edge, d_edge, dtype=torch.float64) for _ in range(L)
         ])
 
+        self.W_post = nn.Linear(d_post, d_post, dtype=torch.float64)
+
         # Final classifier
-        self.W_y = nn.Linear(d_edge + d_node, 1, dtype=torch.float64)
+        self.W_y = nn.Linear(d_edge + d_node + d_post, 1, dtype=torch.float64)
 
         # Visibility weight function
         self.visibility = VisibilityWeight()
@@ -124,6 +126,7 @@ class CascadePredictor(nn.Module):
         x,                  # (N, d_node)
         edge_index,         # (2, E)
         edge_attr,          # (E, d_edge)
+        post_attr,          # (d_post,)
         node_mask,          # (N, L) bool: 1 = frozen node
                             # (has reposted before layer l)
         edge_mask,          # (E, L) bool: 1 = edge frozen
@@ -141,6 +144,8 @@ class CascadePredictor(nn.Module):
 
         h = x
         h_e = edge_attr
+        z_post = self.W_post(post_attr)  # (d_post,)
+        z_post = F.normalize(z_post, p=2, dim=-1)
 
         src, dst = edge_index  # v -> u
         h_v = h[src]  # (E, d)
@@ -167,18 +172,12 @@ class CascadePredictor(nn.Module):
             # group softmax (per source node)
             a_vu = softmax(attn_logits, src)
 
-            # ---- Visibility weights ----
-            w_vis = self.visibility(
-                edge_mask_l, delta_t, t_is_weekend, t_is_afternoon, comments, likes
-            )  # (E,)
-
             # ---- Message aggregation (for src nodes that haven't reposted)----
             messages = (
                 (~edge_mask_l).unsqueeze(-1)
-                * w_vis.unsqueeze(-1)
                 * a_vu.unsqueeze(-1)
                 * h_u
-            )  # (E, d)
+            )  # (E, d_node)
 
             agg = torch.zeros_like(
                 h, dtype=torch.float64).index_add(0, src, messages)
@@ -196,8 +195,13 @@ class CascadePredictor(nn.Module):
             # normalize
             h = F.normalize(h, p=2, dim=-1)
 
+            # ---- Visibility weights ----
+            w_vis = self.visibility(
+                edge_mask_l, delta_t, t_is_weekend, t_is_afternoon, comments, likes
+            )  # (E,)
+
             # ---- Edge update ----
-            h_e_new = torch.sigmoid(self.W_edges[l](h_e))
+            h_e_new = torch.sigmoid(self.W_edges[l](w_vis.unsqueeze(-1) * h_e))
 
             # freeze edges where repost happened
             e_mask_edge = edge_mask_l.unsqueeze(-1)
@@ -210,9 +214,12 @@ class CascadePredictor(nn.Module):
             h_u = h[dst]
             h_v_dot_h_u = (h_v * h_u)
 
+            z_post_e = z_post.unsqueeze(0) * w_vis.unsqueeze(-1)  # (E, d_post)
+
             h_vu = torch.cat([
                 h_e,
-                h_v_dot_h_u
+                h_v_dot_h_u,
+                z_post_e
             ], dim=-1)
 
             # ---- Prediction ----

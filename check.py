@@ -51,6 +51,7 @@ if __name__ == "__main__":
     model = CascadePredictor(
         d_node=4,
         d_edge=3,
+        d_post=6,
         L=3
     )
 
@@ -89,7 +90,8 @@ if __name__ == "__main__":
 
     # ---- Features ----
     x = torch.randn(N, 4, dtype=torch.float64, requires_grad=True)
-    edge_attr = torch.randn(E, 3, dtype=torch.float64)
+    edge_attr = torch.randn(E, 3, dtype=torch.float64, requires_grad=True)
+    post_attr = torch.randn(6, dtype=torch.float64, requires_grad=True)
     followers_count = torch.tensor([1, 1, 2, 1])  # (N,)
     influence_ratio = torch.zeros(N, L, dtype=torch.float64)  # (N, L)
     repost_counts = torch.zeros(N, L, dtype=torch.float64, device=dst.device)
@@ -116,6 +118,7 @@ if __name__ == "__main__":
         x,
         edge_index,
         edge_attr,
+        post_attr,
         node_mask,
         edge_mask,
         followers_count,
@@ -159,11 +162,11 @@ if __name__ == "__main__":
     torch.autograd.gradcheck(survival_loss, (edge_prob, t_event))
 
     torch.autograd.gradcheck(
-        lambda x, edge_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, t_is_weekend, t_is_afternoon, comments, likes: model(
-            x, edge_index, edge_attr, node_mask, edge_mask, followers_count, influence_ratio,
+        lambda x, edge_attr, post_attr, node_mask, edge_mask, followers_count, influence_ratio, delta_t, t_is_weekend, t_is_afternoon, comments, likes: model(
+            x, edge_index, edge_attr, post_attr, node_mask, edge_mask, followers_count, influence_ratio,
             delta_t, t_is_weekend, t_is_afternoon, comments, likes
         ).sum(),
-        (x, edge_attr, node_mask, edge_mask, followers_count,
+        (x, edge_attr, post_attr, node_mask, edge_mask, followers_count,
          influence_ratio, delta_t, t_is_weekend, t_is_afternoon, comments, likes),
         eps=1e-6,
         atol=1e-4,
