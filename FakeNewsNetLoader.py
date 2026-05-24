@@ -202,6 +202,10 @@ class UserDataCache:
 
     def followers(self, uid: str) -> List[str]:
         if uid not in self._followers:
+            path = Path(self.root / "user_followers" / f"{uid}.json")
+            if not path.exists():
+                self._followers[uid] = []
+                return self._followers[uid]
             d = self._load("user_followers", uid)
             # format: {"user_id": "...", "followers": [...]}
             if isinstance(d, dict):
@@ -215,6 +219,10 @@ class UserDataCache:
 
     def following(self, uid: str) -> List[str]:
         if uid not in self._following:
+            path = Path(self.root / "user_following" / f"{uid}.json")
+            if not path.exists():
+                self._following[uid] = []
+                return self._following[uid]
             d = self._load("user_following", uid)
             # format: {"user_id": "...", "followees": [...]}
             if isinstance(d, dict):
@@ -455,6 +463,34 @@ class _GraphBuilder:
         Returns:
             edge_features    : dict mapping (src_uid, dst_uid) to dict of edge features
         """
+        network_path = self.root / f"{self.source}_network.json"
+        if network_path.exists():
+            with open(network_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            self.users_per_cascade = {
+                k: set(v)
+                for k, v in data["users_per_cascade"].items()
+            }
+            edges_raw = data["edges"]
+
+            self.edges = {
+                tuple(k.strip("()").split(",")): v
+                for k, v in edges_raw.items()
+            }
+            valid = True
+
+            if not self.users_per_cascade:
+                print(f"[WARNING] users_per_cascade is empty in {network_path}, rebuilding from scratch.")
+                valid = False
+            
+            if not self.edges:
+                print(f"[WARNING] edges is empty in {network_path}, rebuilding from scratch.")
+                valid = False
+
+            if valid:
+                return self.users_per_cascade, self.edges
+
         news_dirs = []
         for label in LABEL_MAP:
             source_dir = self.root / f"{self.source}_{label}"
@@ -533,6 +569,20 @@ class _GraphBuilder:
                         edge_key = (src, dst)
                         edges[edge_key]["reply_count"] += 1
                         edges[edge_key]["opposition_score"] += compute_opposition(reply.get("text", ""))
+        
+        data = {
+            "users_per_cascade": {
+                k: list(v)
+                for k, v in users_per_cascade.items()
+            },
+            "edges": {
+                f"({u},{v})": val
+                for (u, v), val in edges.items()
+            }
+        }
+
+        with open(network_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
 
         return users_per_cascade, edges
     
@@ -582,7 +632,7 @@ class _GraphBuilder:
         users_of_cascade_expanded = set(self.users_per_cascade.get(cascade_id, set()))
         user_followers_dir = self.root / "user_followers"
         user_following_dir = self.root / "user_following"
-        for user in users_of_cascade_expanded:
+        for user in self.users_per_cascade.get(cascade_id, set()):
             user_followers_path = user_followers_dir / f"{user}.json"
             # else check if user is available in the cache
             followers_data = _safe_load_json(user_followers_path) or {}
@@ -635,13 +685,13 @@ class _GraphBuilder:
 
         if not users_of_cascade_expanded:
             return False
-        n_present = sum(1 for uid in users_of_cascade_expanded if self.cache.has_profile(uid))
+        n_present = sum(1 for uid in users_of_cascade_expanded if self.user_cache.has_profile(uid))
         return (n_present / len(users_of_cascade_expanded)) >= min_coverage
     
     # ------------------------------------------------------------------
     def build(self, cascade: Path, label: int) -> Optional[Data]:
         cascade_id = cascade.stem
-        edges_of_cascade, users_of_cascade_expanded = self._collect_users_of_this_cascade(cascade, self.root)
+        edges_of_cascade, users_of_cascade_expanded = self._collect_edges_of_cascade(cascade_id)
 
 
         news_dir = cascade.parent.parent
@@ -862,7 +912,7 @@ class FakeNewsNetDataset(Dataset):
         self._builder = _GraphBuilder(n_layers=n_layers, user_cache=cache, source=source)
 
         self._index: List[dict] = []   # list of {path, label, source, news_id}
-        # self._build_index(verbose)
+        self._build_index(verbose)
 
     # ------------------------------------------------------------------
     def _build_index(self, verbose: bool):
@@ -874,32 +924,31 @@ class FakeNewsNetDataset(Dataset):
         """
         # counts[source][label_str] = {"included": int, "excluded": int}
         counts: Dict[str, Dict[str, Dict[str, int]]] = {
-            src: {lbl: {"included": 0, "excluded": 0} for lbl in LABEL_MAP}
-            for src in self.sources
+            self.source: {lbl: {"included": 0, "excluded": 0} for lbl in LABEL_MAP}
         }
 
-        for source in self.sources:
-            for label_str, label_int in LABEL_MAP.items():
-                base = self._root / f"{source}_{label_str}"
-                if not base.exists():
+        for label_str, label_int in LABEL_MAP.items():
+            base = self._root / f"{self.source}_{label_str}"
+            if not base.exists():
+                continue
+            for news_dir in sorted(base.iterdir()):
+                if not news_dir.is_dir():
                     continue
-                for news_dir in sorted(base.iterdir()):
-                    if not news_dir.is_dir():
-                        continue
-                    for cascade_dir in news_dir.glob("tweets/*.json"):
-                        edges_of_cascade, users_of_cascade_expanded = self._builder._collect_users_of_this_cascade(
-                            cascade_dir, self.root)
-                        if self._builder.enough_users_present(users_of_cascade_expanded, self.min_coverage):
-                            self._index.append({
-                                "path":     news_dir,
-                                "label":    label_int,
-                                "source":   source,
-                                "news_id":  news_dir.name,
-                            })
-                            counts[source][label_str]["included"] += 1
-                        else:
+                for cascade_dir in news_dir.glob("tweets/*.json"):
+                    edges_of_cascade, users_of_cascade_expanded = self._builder._collect_edges_of_cascade(
+                        cascade_dir.stem
+                    )
+                    if self._builder.enough_users_present(users_of_cascade_expanded, self.min_coverage):
+                        self._index.append({
+                            "path":     news_dir,
+                            "label":    label_int,
+                            "source":   self.source,
+                            "news_id":  news_dir.name,
+                        })
+                        counts[self.source][label_str]["included"] += 1
+                    else:
 
-                            counts[source][label_str]["excluded"] += 1
+                        counts[self.source][label_str]["excluded"] += 1
 
         if verbose:
             self._print_summary(counts)
@@ -996,27 +1045,28 @@ if __name__ == "__main__":
 
     root = sys.argv[1] if len(sys.argv) > 1 else "data/FakeNewsNet"
 
-    dataset = FakeNewsNetDataset(root=root, source="gossipcop", n_layers=4, min_coverage=0.2)
+    dataset = FakeNewsNetDataset(root=root, source="gossipcop", n_layers=4, min_coverage=0.0)
 
-    print(f"Total cascades in dataset : {len(dataset)}")
-    print(f"  politifact              : {len(dataset.indices_for('politifact'))}")
-    print(f"  gossipcop               : {len(dataset.indices_for('gossipcop'))}")
+    # print(f"Total cascades in dataset : {len(dataset)}")
+    # print(f"  politifact              : {len(dataset.indices_for('politifact'))}")
+    # print(f"  gossipcop               : {len(dataset.indices_for('gossipcop'))}")
 
     # Show one sample graph
-    for i in range(min(30, len(dataset))):
-        g = dataset.get(i)
-        if g is not None:
-            print(f"\nSample [{i}]  source={g.source}  news_id={g.news_id}"
-                  f"  label={'fake' if g.y.item() else 'real'}")
-            print(f"  x              : {tuple(g.x.shape)}")
-            print(f"  edge_index     : {tuple(g.edge_index.shape)}")
-            print(f"  edge_attr      : {tuple(g.edge_attr.shape)}")
-            print(f"  node_mask      : {tuple(g.node_mask.shape)}")
-            print(f"  edge_mask      : {tuple(g.edge_mask.shape)}")
-            print(f"  influence_ratio: {tuple(g.influence_ratio.shape)}")
-            print(f"  likes[:4]      : {g.likes[:4].tolist()}")
-            print(f"  comments[:4]   : {g.comments[:4].tolist()}")
-            break
+    # for i in range(min(30, len(dataset))):
+    i = 0
+    g = dataset.get(i)
+    if g is not None:
+        print(f"\nSample [{i}]  source={g.source}  news_id={g.news_id}"
+                f"  label={'fake' if g.y.item() else 'real'}")
+        print(f"  x              : {tuple(g.x.shape)}")
+        print(f"  edge_index     : {tuple(g.edge_index.shape)}")
+        print(f"  edge_attr      : {tuple(g.edge_attr.shape)}")
+        print(f"  node_mask      : {tuple(g.node_mask.shape)}")
+        print(f"  edge_mask      : {tuple(g.edge_mask.shape)}")
+        print(f"  influence_ratio: {tuple(g.influence_ratio.shape)}")
+        print(f"  likes[:4]      : {g.likes[:4].tolist()}")
+        print(f"  comments[:4]   : {g.comments[:4].tolist()}")
+        # break
 
     # Per-source splits
     for src in ["politifact", "gossipcop"]:
