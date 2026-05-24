@@ -712,7 +712,7 @@ class _GraphBuilder:
             dtype=torch.float64,
         )
 
-        node_index = torch.tensor([uid for i, uid in enumerate(users_of_cascade_expanded)], dtype=torch.long)
+        node_index = {uid: i for i, uid in enumerate(users_of_cascade_expanded)}
 
         # ---- Edge features (E, {EDGE_FEATURES_DIM}) and edge_index (2, E) ----
         edge_attr = torch.tensor(
@@ -726,7 +726,7 @@ class _GraphBuilder:
             dtype=torch.float64,
         )
         edge_index = torch.tensor(
-            [[int(src), int(dst)] for (src, dst) in edges_of_cascade.keys()],
+            [[node_index[src], node_index[dst]] for (src, dst) in edges_of_cascade.keys()],
             dtype=torch.long,
         )
 
@@ -738,7 +738,8 @@ class _GraphBuilder:
         node_mask = torch.zeros(x.size(0), dtype=torch.bool)
 
         dst_user = cascade.get("user", {})
-        dst = dst_user.get("id", int(dst_user.get("id_str", 0)))
+        dst = dst_user.get("id_str", str(dst_user.get("id", "")))
+        dst_node_idx = node_index[dst]
         tweet_time = _parse_twitter_time(cascade.get("created_at", ""))
 
         E = len(edges_of_cascade)
@@ -748,7 +749,7 @@ class _GraphBuilder:
         likes_list = np.zeros(E)
 
         # for all edges with this dst, set the temporal features of the edges
-        edges_index_dst = torch.where(edge_index[1] == dst)[0].tolist()
+        edges_index_dst = torch.where(edge_index[1] == dst_node_idx)[0].tolist()
 
         t_is_afternoon_list[edges_index_dst] = _is_afternoon(tweet_time)
         t_is_weekend_list[edges_index_dst] = _is_weekend(tweet_time)
@@ -757,23 +758,22 @@ class _GraphBuilder:
 
         # influence of root user
         retweet_counts = np.zeros(self.L)
-        dst_node_idx = torch.where(node_index == dst)[0].item()
         influence_ratio = torch.zeros(N, dtype=torch.float64)
 
         for rt in retweet_events:
             src_user = rt.get("user", {})
-            src = src_user.get("id", int(src_user.get("id_str", 0)))
+            src = src_user.get("id_str", str(src_user.get("id", "")))
+            src_node_idx = node_index[src]
 
             rt_time = _parse_twitter_time(rt.get("created_at", ""))
             dt = (rt_time - tweet_time).total_seconds() / 3600 if rt_time and tweet_time else self.delta_t
             layer_mask = min(int(dt // self.delta_t), self.L - 1)
 
-            edge_mask[torch.where((edge_index[0] == src))[0].item(), layer_mask] = True
-            src_node_idx = torch.where(node_index == src)[0].item()
+            edge_mask[torch.where((edge_index[0] == src_node_idx))[0].item(), layer_mask] = True
             node_mask[src_node_idx, layer_mask] = True
 
             # for all edges with this src as their dst, set the temporal features of the edges
-            edges_index_src = torch.where(edge_index[1] == src)[0].tolist()
+            edges_index_src = torch.where(edge_index[1] == src_node_idx)[0].tolist()
             
             t_is_afternoon_list[edges_index_src] = (rt_time.hour >= 17)
             t_is_weekend_list[edges_index_src] = (rt_time.weekday() >= 5)
@@ -813,7 +813,6 @@ class _GraphBuilder:
             print()
 
         return Data(
-            node_index      = node_index,
             x               = x,
             edge_index      = edge_index,
             edge_attr       = edge_attr,
