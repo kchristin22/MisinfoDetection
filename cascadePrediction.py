@@ -132,7 +132,7 @@ class CascadePredictor(nn.Module):
         edge_mask,          # (E, L) bool: 1 = edge frozen
                             # (source node has reposted before layer l)
         followers_count,    # (N,)
-        influence_ratio,    # (N, L)
+        influence_ratio,    # (N,)
         delta_t,            # (E,)
         t_is_weekend,       # (E,)
         t_is_afternoon,     # (E,)
@@ -154,7 +154,6 @@ class CascadePredictor(nn.Module):
 
         node_mask_l = node_mask[:, 0]
         edge_mask_l = edge_mask[:, 0]
-        influence_ratio_l = influence_ratio[:, 0]
 
         probs = []
 
@@ -166,7 +165,7 @@ class CascadePredictor(nn.Module):
             attn_logits = (
                 self.w_homophily * homophily +
                 self.w_followers * followers_count[dst] +
-                node_mask_l[dst] * self.w_influence * influence_ratio_l[dst]
+                node_mask_l[dst] * self.w_influence * influence_ratio[dst]
             )
 
             # group softmax (per source node)
@@ -231,7 +230,6 @@ class CascadePredictor(nn.Module):
                 if self.training:
                     node_mask_l = node_mask[:, l + 1]
                     edge_mask_l = edge_mask[:, l + 1]
-                    influence_ratio_l = influence_ratio[:, l + 1]
                 else:
                     with torch.no_grad():
                         predicted_edges = probs_l > 0.5
@@ -250,8 +248,8 @@ class CascadePredictor(nn.Module):
                             dst,
                             predicted_edges.double()
                         )
-                        influence_ratio_l = (
-                            influence_ratio_l * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
+                        influence_ratio = (
+                            influence_ratio * (followers_count + 1e-8) + repost_counts) / (followers_count + 1e-8)
 
         edge_prob = torch.stack(probs, dim=1)  # (E, L)
 

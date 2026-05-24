@@ -93,7 +93,7 @@ if __name__ == "__main__":
     edge_attr = torch.randn(E, 3, dtype=torch.float64, requires_grad=True)
     post_attr = torch.randn(6, dtype=torch.float64, requires_grad=True)
     followers_count = torch.tensor([1, 1, 2, 1])  # (N,)
-    influence_ratio = torch.zeros(N, L, dtype=torch.float64)  # (N, L)
+    influence_ratio = torch.zeros(N, dtype=torch.float64)  # (N,)
     repost_counts = torch.zeros(N, L, dtype=torch.float64, device=dst.device)
     repost_counts.index_put_(
         (dst[edge_ids], layer_ids),
@@ -101,7 +101,7 @@ if __name__ == "__main__":
         accumulate=True
     )
     repost_counts = torch.cumsum(repost_counts, dim=1)
-    influence_ratio = repost_counts / (followers_count.unsqueeze(1) + 1e-8)
+    influence_ratio = repost_counts[:, L - 1] / (followers_count + 1e-8)
     delta_t = torch.rand(E)
     t = ["2024-01-01"] * E
     timestamps = pd.to_datetime(t)
