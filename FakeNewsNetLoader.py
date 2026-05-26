@@ -635,36 +635,38 @@ class _GraphBuilder:
         for user in self.users_per_cascade.get(cascade_id, set()):
             user_followers_path = user_followers_dir / f"{user}.json"
             # else check if user is available in the cache
-            followers_data = _safe_load_json(user_followers_path) or {}
-            followers = followers_data.get("followers", [])
-            for src in followers:
-                edge_key = (str(src), user)
-                # if (src, dst) does not exist in edges, default to zero edge features
-                if edge_key not in self.edges:
-                    edges_of_cascade[edge_key] = {
-                        "retweet_count": 0,
-                        "like_count": 0,
-                        "reply_count": 0,
-                        "opposition_score": 0.0,
-                        "hours_since_last_retweet": 0.0,
-                    }
-                users_of_cascade_expanded.update(str(src))
+            if user_followers_path.exists():
+                followers_data = _safe_load_json(user_followers_path) or {}
+                followers = followers_data.get("followers", [])
+                for src in followers:
+                    edge_key = (str(src), user)
+                    # if (src, dst) does not exist in edges, default to zero edge features
+                    if edge_key not in self.edges:
+                        edges_of_cascade[edge_key] = {
+                            "retweet_count": 0,
+                            "like_count": 0,
+                            "reply_count": 0,
+                            "opposition_score": 0.0,
+                            "hours_since_last_retweet": 0.0,
+                        }
+                    users_of_cascade_expanded.update(str(src))
 
             user_following_path = user_following_dir / f"{user}.json"
             # else check if user is available in the cache
-            following_data = _safe_load_json(user_following_path) or {}
-            following = following_data.get("followees", []) or []
-            for dst in following:
-                edge_key = (user, str(dst))
-                if edge_key not in self.edges:
-                    edges_of_cascade[edge_key] = {
-                        "retweet_count": 0,
-                        "like_count": 0,
-                        "reply_count": 0,
-                        "opposition_score": 0.0,
-                        "hours_since_last_retweet": 0.0,
-                    }
-                users_of_cascade_expanded.update(str(dst))
+            if user_following_path.exists():
+                following_data = _safe_load_json(user_following_path) or {}
+                following = following_data.get("followees", []) or []
+                for dst in following:
+                    edge_key = (user, str(dst))
+                    if edge_key not in self.edges:
+                        edges_of_cascade[edge_key] = {
+                            "retweet_count": 0,
+                            "like_count": 0,
+                            "reply_count": 0,
+                            "opposition_score": 0.0,
+                            "hours_since_last_retweet": 0.0,
+                        }
+                    users_of_cascade_expanded.update(str(dst))
 
         # Add the edges from the retweet, like and reply events for this cascade
         for edge_key, features in self.edges.items():
@@ -911,7 +913,18 @@ class FakeNewsNetDataset(Dataset):
         self._builder = _GraphBuilder(n_layers=n_layers, user_cache=cache, source=source)
 
         self._index: List[dict] = []   # list of {path, label, source, news_id}
-        self._build_index(verbose)
+        fake_dir = self._root / f"{self.source}_fake"
+        real_dir = self._root / f"{self.source}_real"
+        fake_folders = sorted([p for p in fake_dir.iterdir() if p.is_dir()])
+        real_folders = sorted([p for p in real_dir.iterdir() if p.is_dir()])
+        folders = fake_folders + real_folders
+        self.cascades = []
+        for folder in folders:
+            # iterate through tweets in the folder and store paths
+            for cascade in (folder / "tweets").glob("*.json"):
+                self.cascades.append(cascade)
+
+        # self._build_index(verbose)
 
     # ------------------------------------------------------------------
     def _build_index(self, verbose: bool):
@@ -982,11 +995,13 @@ class FakeNewsNetDataset(Dataset):
         return len(self._index)
 
     def get(self, idx: int) -> Optional[Data]:
-        entry = self._index[idx]
-        g = self._builder.build(entry["path"], entry["label"])
+        label_dir = self.cascades[idx].parent.parent.parent
+        label = LABEL_MAP[label_dir.name.split("_")[-1]]
+        print(f"\n[DEBUG] Building graph for index {idx}  source={self.source}  news_id={self.cascades[idx].parent.parent.name}  label={label}")
+        g = self._builder.build(self.cascades[idx], label)
         if g is not None:
-            g.source  = entry["source"]
-            g.news_id = entry["news_id"]
+            g.source  = self.source
+            g.news_id = self.cascades[idx].parent.parent.name
         return g
 
     # ------------------------------------------------------------------
